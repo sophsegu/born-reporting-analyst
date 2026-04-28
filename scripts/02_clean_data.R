@@ -58,6 +58,18 @@ cleaned <- data %>%
       mager >= 20 & mager <= 34 ~ "20-34",
       mager >= 35 ~ "35+"
     ),
+    race_eth = recode_factor(mracehisp,
+                             `1` = "Non-Hispanic White",
+                             `2` = "Non-Hispanic Black",
+                             `3` = "Hispanic",
+                             `4` = "Non-Hispanic Other",
+                             .default = "Unknown"),
+    
+    sex = case_when(
+      sex == "M" ~ "Male",
+      sex == "F" ~ "Female",
+      TRUE ~ "Unknown"
+    ),
     education = recode_factor(meduc, `1`="<High school", `2`="High school", `3`="Some college", 
                               `4`="College grad", `5`="Advanced degree", .default = "Unknown"),
     prior_preterm = if_else(rf_ppterm == "Y", "Yes", "No"),
