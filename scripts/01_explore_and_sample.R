@@ -59,7 +59,7 @@ sample_term <- natal %>%
 natal_sample <- bind_rows(sample_preterm, sample_term) %>%
   slice_sample(prop = 1)   # shuffle
 
-write_csv(natal_sample, "data/processed/natal_2022_sample.csv")
+write_csv(natal_sample, "data/processed/natal_2018_sample.csv")
 
 cat("Sample saved with", nrow(natal_sample), "rows.\n")
 cat("Preterm rows:", sum(natal_sample$preterm_flag == "preterm"), "\n")
