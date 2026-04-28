@@ -1,0 +1,195 @@
+---
+title: "Perinatal Health Surveillance – United States, 2022"
+subtitle: "CDC Natality Data – Smoking, BMI, and Preterm Birth"
+author: "Sophie Séguin"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+  html_document:
+    toc: true
+    toc_float: true
+params:
+  use_database: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(DBI)
+library(RPostgres)
+library(knitr)
+library(gtsummary)   # for Table 1
+library(sandwich)    # robust standard errors
+library(lmtest)      # coeftest
+library(broom)       # tidy model output
+library(forestplot)  # forest plot (optional, ggplot2 can also do it)
+```
+
+## Data Source and Methods
+
+The data are from the **CDC Natality Public Use File** for 2022, accessed via the NBER.  
+We sampled 500,000 live births (stratified by preterm status) and stored them in a PostgreSQL star schema.
+
+**Definitions:**  
+- **Preterm birth**: gestational age < 37 weeks (`gestrec3 == 1`).  
+- **Smoking pattern**: derived from cigarettes before pregnancy and during each trimester.  
+- **BMI category**: pre‑pregnancy BMI (WHO cutoffs).  
+- **Risk ratios**: estimated using modified Poisson regression with robust standard errors.
+
+```{r load_data}
+if (params$use_database) {
+  con <- dbConnect(
+    RPostgres::Postgres(),
+    dbname   = "postgres",
+    host     = "localhost",
+    port     = 5432,
+    user     = "postgres",
+    password = "1234"        # <<< replace
+  )
+  
+  # Query fact table joined with dimensions
+  df <- dbGetQuery(con, "
+    SELECT
+  m.age_group            AS maternal_age_group,
+  m.race_eth,
+  m.education,
+  m.bmi_cat,
+  m.prior_preterm,
+  m.diabetes,
+  d.c_section,
+  i.sex,
+  f.preterm_flag,
+  f.birth_weight,
+  f.apgar5,
+  f.lbw_flag            AS lbw,
+  f.nicu_flag           AS nicu,
+  f.smoking_pattern,
+  f.smoke_before,
+  f.smoke_tri1,
+  f.smoke_tri2,
+  f.smoke_tri3
+FROM fact_births f
+JOIN dim_maternal m ON f.maternal_id = m.maternal_id
+JOIN dim_delivery d ON f.delivery_id = d.delivery_id
+JOIN dim_infant   i ON f.infant_id   = i.infant_id
+  ")
+  dbDisconnect(con)
+} else {
+  # Option 2: Read CSV directly (fallback)
+  df <- read_csv("data/processed/natal_cleaned.csv")
+}
+
+# Ensure preterm_flag is a factor with 'term' as reference
+df <- df %>%
+  mutate(
+    preterm_flag = factor(preterm_flag, levels = c("term", "preterm")),
+    smoking_pattern = factor(smoking_pattern,
+      levels = c("never", "quit_early", "quit_late", "started", "persistent")),
+    bmi_cat = factor(bmi_cat,
+      levels = c("Normal", "Underweight", "Overweight", "Obese")),
+    maternal_age_group = factor(maternal_age_group,
+      levels = c("20-34", "<20", "35+")),
+    race_eth = factor(race_eth),
+    education = factor(education,
+      levels = c("College grad", "Some college", "High school", "<High school", "Advanced degree")),
+    prior_preterm = factor(prior_preterm, levels = c("No", "Yes")),
+    diabetes = factor(diabetes, levels = c("No", "Yes")),
+    c_section = factor(c_section, levels = c("Vaginal", "C-section")),
+    sex = factor(sex, levels = c("Male", "Female"))
+  )
+```
+
+## Results
+
+### Table 1 – Maternal and Pregnancy Characteristics by Preterm Status
+
+```{r table1}
+tbl1 <- df %>%
+  select(
+    preterm_flag,
+    maternal_age_group,
+    race_eth,
+    education,
+    bmi_cat,
+    prior_preterm,
+    diabetes,
+    c_section,
+    sex
+  ) %>%
+  tbl_summary(by = preterm_flag, missing = "ifany", percent = "row") %>%
+  add_p() %>%
+  modify_header(label = "**Characteristic**")
+
+tbl1
+```
+
+### Prevalence of Preterm Birth by Smoking Pattern
+
+```{r prevalence_smoking}
+prev_smoke <- df %>%
+  filter(!is.na(smoking_pattern)) %>%
+  group_by(smoking_pattern) %>%
+  summarise(
+    n = n(),
+    preterm_n = sum(preterm_flag == "preterm"),
+    preterm_pct = 100 * mean(preterm_flag == "preterm")
+  )
+
+kable(prev_smoke, digits = 1, caption = "Preterm birth prevalence by smoking pattern")
+```
+
+### Risk Ratio Analysis
+
+We model preterm birth (preterm vs. term) using modified Poisson regression with robust standard errors to obtain risk ratios.
+
+```{r rrmodel}
+# Unadjusted model for smoking pattern
+mod1 <- glm((preterm_flag == "preterm") ~ smoking_pattern,
+            data = df, family = poisson)
+# Robust SE
+cov1 <- vcovHC(mod1, type = "HC0")
+rr1 <- exp(coef(mod1)[-1])  # vs 'never'
+ci1 <- exp(coefci(mod1, vcov = cov1, level = 0.95))[-1, ]
+rr_table1 <- data.frame(
+  Variable = gsub("smoking_pattern", "", names(rr1)),
+  RR = round(rr1, 2),
+  CI = sprintf("%.2f–%.2f", ci1[,1], ci1[,2])
+)
+
+# Adjusted model: smoking + BMI + age + education + prior preterm + diabetes
+mod2 <- glm((preterm_flag == "preterm") ~ smoking_pattern + bmi_cat +
+              maternal_age_group + education + prior_preterm + diabetes,
+            data = df, family = poisson)
+cov2 <- vcovHC(mod2, type = "HC0")
+rr2 <- exp(coef(mod2)[-1])
+ci2 <- exp(coefci(mod2, vcov = cov2, level = 0.95))[-1, ]
+
+# Prepare forest plot data
+plot_data <- data.frame(
+  var = names(rr2)[1:length(rr2)],        # adjust for intercept removal
+  rr = round(rr2, 2),
+  lower = round(ci2[seq(1, nrow(ci2), 1), 1], 2),
+  upper = round(ci2[seq(1, nrow(ci2), 1), 2], 2)
+) %>% filter(!grepl("Intercept", var)) %>%
+  mutate(var = str_remove_all(var, "smoking_pattern|bmi_cat|maternal_age_group|education|prior_preterm|diabetes"))
+```
+
+### Adjusted Risk Ratios (Forest Plot)
+
+```{r forestplot, fig.height=6}
+ggplot(plot_data, aes(x = rr, y = reorder(var, rr))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey") +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2) +
+  scale_x_log10() +
+  labs(x = "Adjusted Risk Ratio (95% CI)", y = "") +
+  theme_minimal()
+```
+
+## Conclusion
+
+Persistent smoking during pregnancy is strongly associated with preterm birth, even after adjusting for BMI and other confounders. Obesity also increases the risk. This automated report can be regenerated whenever the underlying data update, providing a reproducible BI pipeline.
