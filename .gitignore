@@ -1,0 +1,16 @@
+# Ignore large data files
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# R files
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# SAS temporary files
+*.sas7bdat
+*.lst
+*.log
